@@ -1,0 +1,199 @@
+name: LIXIANGTOOLS installed-client inspection
+
+on:
+  push:
+    branches:
+      - analysis/lixiangtools-static
+    paths:
+      - .github/workflows/lixiangtools-install-inspect.yml
+      - experiments/lixiangtools/**
+  pull_request:
+    paths:
+      - .github/workflows/lixiangtools-install-inspect.yml
+      - experiments/lixiangtools/**
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  isolated-inspection:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install read-only analysis library
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check pefile==2024.8.26 capstone==5.0.6
+
+      - name: Download SHA-256 pinned vendor installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path reports | Out-Null
+          $installer = Join-Path $env:RUNNER_TEMP 'LItools_v2.0.exe'
+          Invoke-WebRequest -Uri 'https://www.lixiang.tools/downloads/LItools_v2.0.exe' -OutFile $installer -UserAgent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+          $expected = '6bf6b992f121343da374645caaecd0cae53230c8664a9d1e3be6ba014ccbbf3f'
+          $actual = (Get-FileHash -Path $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "SHA-256 mismatch: $actual; expected $expected" }
+          "Installer SHA-256: $actual" | Set-Content -Path reports\installer-facts.txt
+
+      - name: Install into disposable Windows runner without login or vehicle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $installer = Join-Path $env:RUNNER_TEMP 'LItools_v2.0.exe'
+          $log = Join-Path $env:RUNNER_TEMP 'litools-setup.log'
+          $args = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG=$log"
+          "Attempting unattended installation with documented Inno Setup switches." | Out-File reports\install-status.txt
+          try {
+            $p = Start-Process -FilePath $installer -ArgumentList $args -PassThru -ErrorAction Stop
+            "Installer PID: $($p.Id)" | Out-File reports\install-status.txt -Append
+            try {
+              Wait-Process -Id $p.Id -Timeout 55 -ErrorAction Stop
+              $p.Refresh()
+              "Installer exit code: $($p.ExitCode)" | Out-File reports\install-status.txt -Append
+            } catch {
+              "Install was still running or required interaction after timeout: $($_.Exception.Message)" | Out-File reports\install-status.txt -Append
+              & taskkill /PID $p.Id /T /F 2>&1 | Out-File reports\install-status.txt -Append
+            }
+          } catch {
+            "Installer launch error: $($_.Exception.Message)" | Out-File reports\install-status.txt -Append
+          }
+          if (Test-Path $log) {
+            Get-Content -Path $log -Tail 150 | Out-File reports\setup-log-tail.txt
+          }
+          exit 0
+
+      - name: Inventory installed binaries and client modules
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $roots = @(
+            'C:\Program Files\LIXIANGTOOLS',
+            $env:ProgramFiles,
+            [Environment]::GetFolderPath('ProgramFilesX86'),
+            $env:LOCALAPPDATA,
+            $env:APPDATA,
+            $env:ProgramData,
+            'C:\'
+          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+          $foundFolders = New-Object System.Collections.Generic.List[string]
+          foreach ($root in $roots) {
+            $dirs = @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match '(?i)li.?tools|lixiang' })
+            foreach ($d in $dirs) { $foundFolders.Add($d.FullName) }
+          }
+          $uninstall = @(
+            Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue
+            Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue
+            Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue
+          ) | Where-Object { $_.DisplayName -match '(?i)li.?tools|lixiang' } |
+            Select-Object DisplayName,DisplayVersion,Publisher,InstallLocation,DisplayIcon
+          $uninstall | ConvertTo-Json -Depth 5 | Set-Content reports\uninstall-registry.json
+          foreach ($item in @($uninstall)) {
+            if ($item.InstallLocation -and (Test-Path $item.InstallLocation)) { $foundFolders.Add($item.InstallLocation) }
+          }
+          $foundFolders = @($foundFolders + @('C:\Program Files\LIXIANGTOOLS') | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique)
+          @($foundFolders) | Out-File reports\install-locations.txt
+          $fileInventory = @()
+          foreach ($dir in $foundFolders) {
+            $files = @(Get-ChildItem $dir -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 2500)
+            foreach ($f in $files) {
+              $fileInventory += [pscustomobject]@{base=$dir;path=$f.FullName.Substring($dir.Length);length=$f.Length;extension=$f.Extension}
+            }
+          }
+          $fileInventory | ConvertTo-Json -Depth 5 | Set-Content reports\installed-files.json
+          "Matched folders: $($foundFolders.Count); inventoried files: $($fileInventory.Count)" | Out-File reports\inventory-summary.txt
+          $target = @($foundFolders | Where-Object { Get-ChildItem $_ -Filter '*.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 }) | Select-Object -First 1
+          if ($target) {
+            python experiments/lixiangtools/static_triage.py "$target" --output reports
+            $main = Join-Path $target "LIXIANGTOOLS.exe"
+            if (Test-Path $main) { python experiments/lixiangtools/focused_strings.py "$main" --output reports }
+            python experiments/lixiangtools/trace_ui.py "$target" --output reports
+            if (Test-Path $main) { python experiments/lixiangtools/pe_xref_scan.py "$main" --output reports }
+          } else {
+            "No installed application folder with EXE found" | Out-File reports\triage-blocker.txt
+          }
+          exit 0
+
+
+      - name: Prepare Node for REA fork
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+
+      - name: Run repo's REA static JS analysis
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $installed = 'C:\Program Files\LIXIANGTOOLS'
+          $ui = Join-Path $env:RUNNER_TEMP 'litools_ui_static'
+          New-Item -ItemType Directory -Force -Path $ui | Out-Null
+          Copy-Item (Join-Path $installed 'boot_fallback.js') $ui -ErrorAction SilentlyContinue
+          Copy-Item (Join-Path $installed 'boot_fallback.html') $ui -ErrorAction SilentlyContinue
+          if (-not (Test-Path (Join-Path $ui 'boot_fallback.js'))) {
+            'Client UI not found; REA not executed' | Out-File reports\rea-ui-status.txt
+            exit 0
+          }
+          npm ci --no-audit --no-fund 1> reports\rea-npm.stdout.txt 2> reports\rea-npm.stderr.txt
+          if ($LASTEXITCODE -ne 0) {
+            'REA fork npm ci failed' | Out-File reports\rea-ui-status.txt
+            exit 0
+          }
+          npm run build:cached 1> reports\rea-build.stdout.txt 2> reports\rea-build.stderr.txt
+          if ($LASTEXITCODE -ne 0) {
+            'REA fork build failed' | Out-File reports\rea-ui-status.txt
+            exit 0
+          }
+          node scripts/rea.mjs analyze-javascript-application "$ui" --json 1> reports\rea-ui-graph.json 2> reports\rea-ui-error.txt
+          $code = $LASTEXITCODE
+          "REA from fork exit code: $code" | Out-File reports\rea-ui-status.txt
+          if (Test-Path reports\rea-ui-graph.json) {
+            $size = (Get-Item reports\rea-ui-graph.json).Length
+            "Result bytes: $size" | Out-File reports\rea-ui-status.txt -Append
+            if ($size -gt 2000000) {
+              Remove-Item reports\rea-ui-graph.json
+              'Graph omitted to bound artifact size' | Out-File reports\rea-ui-status.txt -Append
+            }
+          }
+          if ($code -ne 0) {
+            "Fork checkout lacks the packaged Windows native manifest; attempt released REA as fallback." | Out-File reports\rea-ui-status.txt -Append
+            npm install --global rea-agents@6.7.0 --no-audit --no-fund 1> reports\rea-release-install.stdout.txt 2> reports\rea-release-install.stderr.txt
+            if ($LASTEXITCODE -eq 0) {
+              rea analyze-javascript-application "$ui" --json 1> reports\rea-ui-packaged.json 2> reports\rea-ui-packaged.stderr.txt
+              "REA packaged exit code: $LASTEXITCODE" | Out-File reports\rea-ui-status.txt -Append
+              if (Test-Path reports\rea-ui-packaged.json) {
+                python experiments/lixiangtools/project_rea_graph.py reports\rea-ui-packaged.json --output reports\rea-ui-summary.json
+                python experiments/lixiangtools/trace_rea_semantics.py reports\rea-ui-packaged.json --output reports\rea-semantic-open-adb.json
+                $raw = Get-Content reports\rea-ui-packaged.json -Raw -ErrorAction SilentlyContinue
+                try {
+                  $obj = $raw | ConvertFrom-Json -Depth 100
+                  $status = if ($obj.error) { "ERROR: $($obj.error)" } else { "OK" }
+                  "Packaged result status: $status" | Out-File reports\rea-ui-status.txt -Append
+                } catch {
+                  "Packaged output JSON could not be parsed: $($_.Exception.Message)" | Out-File reports\rea-ui-status.txt -Append
+                }
+                if ((Get-Item reports\rea-ui-packaged.json).Length -gt 5000000) {
+                  Remove-Item reports\rea-ui-packaged.json
+                  "Packaged graph was too large for artifact; full graph omitted" | Out-File reports\rea-ui-status.txt -Append
+                }
+              }
+            }
+          }
+          exit 0
+
+      - name: Upload metadata-only report (no proprietary binaries)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lixiangtools-installed-client-report
+          path: reports/**
+          if-no-files-found: warn
+          retention-days: 7

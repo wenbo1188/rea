@@ -1,0 +1,66 @@
+name: LIXIANGTOOLS Inno Setup extraction trial
+
+on:
+  push:
+    branches:
+      - analysis/lixiangtools-static
+  pull_request:
+    paths:
+      - '.github/workflows/lixiangtools-inno.yml'
+      - 'experiments/lixiangtools/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unpack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install read-only extractors
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq innoextract
+          python3 -m pip install --break-system-packages --disable-pip-version-check pefile==2024.8.26
+
+      - name: Fetch and verify original LIXIANGTOOLS v2.2.25 installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/LIXIANGTOOLS_TARGET" reports
+          curl -fLS --retry 3 --user-agent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' \
+            'https://www.lixiang.tools/downloads/LItools_v2.0.exe' \
+            -o "$RUNNER_TEMP/LIXIANGTOOLS_TARGET/LItools_v2.0.exe"
+          echo '6bf6b992f121343da374645caaecd0cae53230c8664a9d1e3be6ba014ccbbf3f  '"$RUNNER_TEMP/LIXIANGTOOLS_TARGET/LItools_v2.0.exe" | sha256sum --check
+          echo "SHA-256 verified; installer is not executed" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Inspect installer metadata and attempt Inno Setup extraction
+        shell: bash
+        run: |
+          set +e
+          mkdir -p reports "$RUNNER_TEMP/LIXIANGTOOLS_TARGET/extracted"
+          src="$RUNNER_TEMP/LIXIANGTOOLS_TARGET/LItools_v2.0.exe"
+          innoextract --version > reports/innoextract-version.txt 2>&1
+          innoextract --info "$src" > reports/inno-info.txt 2>&1
+          echo "innoextract_info_exit=$?" > reports/extraction-status.txt
+          innoextract --extract --output-dir "$RUNNER_TEMP/LIXIANGTOOLS_TARGET/extracted" "$src" > reports/inno-extraction.log 2>&1
+          echo "innoextract_extract_exit=$?" >> reports/extraction-status.txt
+          find "$RUNNER_TEMP/LIXIANGTOOLS_TARGET/extracted" -type f -printf '%P\t%s bytes\n' | head -n 200 > reports/extracted-file-list.txt
+          exit 0
+
+      - name: Analyze recovered files without executing them
+        shell: bash
+        run: |
+          python3 experiments/lixiangtools/static_triage.py "$RUNNER_TEMP/LIXIANGTOOLS_TARGET" --output reports
+
+      - name: Upload metadata only (do not redistribute executables)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lixiangtools-inno-extraction-evidence
+          path: reports/**
+          retention-days: 7
+          if-no-files-found: warn
