@@ -121,6 +121,49 @@ jobs:
           }
           exit 0
 
+
+      - name: Prepare Node for REA fork
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+
+      - name: Run repo's REA static JS analysis
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $installed = 'C:\Program Files\LIXIANGTOOLS'
+          $ui = Join-Path $env:RUNNER_TEMP 'litools_ui_static'
+          New-Item -ItemType Directory -Force -Path $ui | Out-Null
+          Copy-Item (Join-Path $installed 'boot_fallback.js') $ui -ErrorAction SilentlyContinue
+          Copy-Item (Join-Path $installed 'boot_fallback.html') $ui -ErrorAction SilentlyContinue
+          if (-not (Test-Path (Join-Path $ui 'boot_fallback.js'))) {
+            'Client UI not found; REA not executed' | Out-File reports\rea-ui-status.txt
+            exit 0
+          }
+          npm ci --no-audit --no-fund 1> reports\rea-npm.stdout.txt 2> reports\rea-npm.stderr.txt
+          if ($LASTEXITCODE -ne 0) {
+            'REA fork npm ci failed' | Out-File reports\rea-ui-status.txt
+            exit 0
+          }
+          npm run build:cached 1> reports\rea-build.stdout.txt 2> reports\rea-build.stderr.txt
+          if ($LASTEXITCODE -ne 0) {
+            'REA fork build failed' | Out-File reports\rea-ui-status.txt
+            exit 0
+          }
+          node scripts/rea.mjs analyze-javascript-application "$ui" --json 1> reports\rea-ui-graph.json 2> reports\rea-ui-error.txt
+          $code = $LASTEXITCODE
+          "REA from fork exit code: $code" | Out-File reports\rea-ui-status.txt
+          if (Test-Path reports\rea-ui-graph.json) {
+            $size = (Get-Item reports\rea-ui-graph.json).Length
+            "Result bytes: $size" | Out-File reports\rea-ui-status.txt -Append
+            if ($size -gt 2000000) {
+              Remove-Item reports\rea-ui-graph.json
+              'Graph omitted to bound artifact size' | Out-File reports\rea-ui-status.txt -Append
+            }
+          }
+          exit 0
+
       - name: Upload metadata-only report (no proprietary binaries)
         if: always()
         uses: actions/upload-artifact@v4
