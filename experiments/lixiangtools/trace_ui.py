@@ -81,11 +81,17 @@ def main(install, out):
             for m in matches[:MAX_PER_ANCHOR]:
                 snippet=safe(txt[max(0,m.start()-160):min(len(txt),m.end()+220)])
                 snippets.append({"term":term,"offset":m.start(),"excerpt":snippet[:400]})
+        extended = []
+        for exact in ("window.bridge.startOpenAdb", "r.params || {}", "window.bridge.callAsync", "open_adb"):
+            for match in list(re.finditer(re.escape(exact), txt, flags=re.I))[:3]:
+                extended.append({"anchor":exact,"offset":match.start(),
+                                 "excerpt":safe(txt[max(0,match.start()-2600):min(len(txt),match.end()+900)])})
         snippets.sort(key=lambda x:x["offset"])
         result["ui"][rel]={"size_bytes":p.stat().st_size,
                             "sha256":hashlib.sha256(p.read_bytes()).hexdigest(),
                             "matches":snippets[:MAX_UI_MATCHES],
-                            "total_candidate_matches":len(snippets)}
+                            "total_candidate_matches":len(snippets),
+                            "openadb_extended":extended[:12]}
     (out/"trace_ui_symbols.json").write_text(json.dumps(result,indent=2,ensure_ascii=False),encoding="utf-8")
     lines=["# Static UI and Nuitka literal proximity evidence", "",
            "All data are read-only observations of installed binaries/UI. Proximity is not control flow.", ""]
