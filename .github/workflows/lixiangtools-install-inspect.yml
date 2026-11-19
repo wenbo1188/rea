@@ -55,7 +55,7 @@ jobs:
             $p = Start-Process -FilePath $installer -ArgumentList $args -PassThru -ErrorAction Stop
             "Installer PID: $($p.Id)" | Out-File reports\install-status.txt -Append
             try {
-              Wait-Process -Id $p.Id -Timeout 210 -ErrorAction Stop
+              Wait-Process -Id $p.Id -Timeout 55 -ErrorAction Stop
               $p.Refresh()
               "Installer exit code: $($p.ExitCode)" | Out-File reports\install-status.txt -Append
             } catch {
@@ -75,6 +75,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $roots = @(
+            'C:\Program Files\LIXIANGTOOLS',
             $env:ProgramFiles,
             [Environment]::GetFolderPath('ProgramFilesX86'),
             $env:LOCALAPPDATA,
@@ -82,11 +83,11 @@ jobs:
             $env:ProgramData,
             'C:\'
           ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
-          $matches = New-Object System.Collections.Generic.List[string]
+          $foundFolders = New-Object System.Collections.Generic.List[string]
           foreach ($root in $roots) {
             $dirs = @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
               Where-Object { $_.Name -match '(?i)li.?tools|lixiang' })
-            foreach ($d in $dirs) { $matches.Add($d.FullName) }
+            foreach ($d in $dirs) { $foundFolders.Add($d.FullName) }
           }
           $uninstall = @(
             Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue
@@ -96,20 +97,20 @@ jobs:
             Select-Object DisplayName,DisplayVersion,Publisher,InstallLocation,DisplayIcon
           $uninstall | ConvertTo-Json -Depth 5 | Set-Content reports\uninstall-registry.json
           foreach ($item in @($uninstall)) {
-            if ($item.InstallLocation -and (Test-Path $item.InstallLocation)) { $matches.Add($item.InstallLocation) }
+            if ($item.InstallLocation -and (Test-Path $item.InstallLocation)) { $foundFolders.Add($item.InstallLocation) }
           }
-          $matches = @($matches | Select-Object -Unique)
-          @($matches) | Out-File reports\install-locations.txt
+          $foundFolders = @($foundFolders + @('C:\Program Files\LIXIANGTOOLS') | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique)
+          @($foundFolders) | Out-File reports\install-locations.txt
           $fileInventory = @()
-          foreach ($dir in $matches) {
+          foreach ($dir in $foundFolders) {
             $files = @(Get-ChildItem $dir -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 2500)
             foreach ($f in $files) {
               $fileInventory += [pscustomobject]@{base=$dir;path=$f.FullName.Substring($dir.Length);length=$f.Length;extension=$f.Extension}
             }
           }
           $fileInventory | ConvertTo-Json -Depth 5 | Set-Content reports\installed-files.json
-          "Matched folders: $($matches.Count); inventoried files: $($fileInventory.Count)" | Out-File reports\inventory-summary.txt
-          $target = @($matches | Where-Object { Get-ChildItem $_ -Filter '*.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 }) | Select-Object -First 1
+          "Matched folders: $($foundFolders.Count); inventoried files: $($fileInventory.Count)" | Out-File reports\inventory-summary.txt
+          $target = @($foundFolders | Where-Object { Get-ChildItem $_ -Filter '*.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 }) | Select-Object -First 1
           if ($target) {
             python experiments/lixiangtools/static_triage.py "$target" --output reports
           } else {
