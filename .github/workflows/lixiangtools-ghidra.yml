@@ -1,0 +1,145 @@
+name: LIXIANGTOOLS native REA Ghidra investigation
+
+on:
+  push:
+    branches: [analysis/lixiangtools-static]
+    paths:
+      - .github/workflows/lixiangtools-ghidra.yml
+      - experiments/lixiangtools/ghidra_results.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ghidra:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download vendor installer with pinned SHA-256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path reports | Out-Null
+          $installer = Join-Path $env:RUNNER_TEMP "LItools_v2.0.exe"
+          Invoke-WebRequest -Uri 'https://www.lixiang.tools/downloads/LItools_v2.0.exe' -OutFile $installer -UserAgent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+          $expected='6bf6b992f121343da374645caaecd0cae53230c8664a9d1e3be6ba014ccbbf3f'
+          $actual=(Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Unexpected installer SHA256: $actual" }
+          "Vendor installer SHA256 verified: $actual" | Out-File reports\identity.txt
+
+      - name: Install app in disposable Windows runner without running client or accessing car
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          $installer=Join-Path $env:RUNNER_TEMP "LItools_v2.0.exe"
+          $p = Start-Process -FilePath $installer -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-' -PassThru
+          try {
+            Wait-Process -Id $p.Id -Timeout 60 -ErrorAction Stop
+            $p.Refresh()
+            "Installer exit code: $($p.ExitCode)" | Out-File reports\install.txt
+          } catch {
+            "Installer timeout after files were unpacked; stopping driver/setup task" | Out-File reports\install.txt
+            & taskkill /PID $p.Id /T /F 2>&1 | Out-Null
+          }
+          $exe = 'C:\Program Files\LIXIANGTOOLS\LIXIANGTOOLS.exe'
+          if (!(Test-Path $exe)) { throw "LIXIANGTOOLS.exe absent" }
+          $sha=(Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "Main exe SHA256: $sha" | Out-File reports\identity.txt -Append
+          if ($sha -ne 'c68cf7cb91133a9dddeb35af4fe650fc726f217534bbca959e3ccec45c403199') { throw "Unexpected main binary version" }
+          exit 0
+
+      - name: Download verified Ghidra release (not a vendor binary)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $dir=Join-Path $env:RUNNER_TEMP 'ghidra'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $zip=Join-Path $env:RUNNER_TEMP 'ghidra_12.1.4.zip'
+          $url='https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip'
+          curl.exe -fL --retry 3 --output $zip $url
+          if ($LASTEXITCODE -ne 0) { throw "Could not download Ghidra" }
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          $unpacked = @(Get-ChildItem $dir -Directory | Where-Object Name -Match '^ghidra_12\.1\.4_PUBLIC')
+          if ($unpacked.Count -ne 1) { throw "Unexpected Ghidra archive layout" }
+          $unpacked[0].FullName | Out-File reports\ghidra-root.txt
+          "Ghidra 12.1.4 archive installed in temporary runner." | Out-File reports\identity.txt -Append
+
+      - name: Set up published REA and check Ghidra provider
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          npm install --global rea-agents@6.7.0 --no-audit --no-fund 1> reports\rea-install-stdout.txt 2> reports\rea-install-stderr.txt
+          if ($LASTEXITCODE -ne 0) { throw "REA npm installation failed" }
+          $env:GHIDRA_INSTALL_DIR=(Get-Content reports\ghidra-root.txt -Raw).Trim()
+          $env:REA_ANALYSIS_PROVIDER='ghidra'
+          rea doctor --provider ghidra --json 1> reports\ghidra-doctor.json 2> reports\ghidra-doctor.stderr.txt
+          "REA doctor exit: $LASTEXITCODE" | Out-File reports\rea-queries.txt
+          exit 0
+
+      - name: Run read-only Ghidra static functions / refs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          $exe='C:\Program Files\LIXIANGTOOLS\LIXIANGTOOLS.exe'
+          $env:GHIDRA_INSTALL_DIR=(Get-Content reports\ghidra-root.txt -Raw).Trim()
+          $env:REA_ANALYSIS_PROVIDER='ghidra'
+          foreach ($spec in @(
+            @{label='openadb-ui-bridge-string';selector='startOpenAdb';operation='search'},
+            @{label='uart-trigger-module-string';selector='unlock.uart_trigger';operation='search'},
+            @{label='laconfig-payload-string';selector='laconfig_b64';operation='search'},
+            @{label='uart-trigger-ref';selector='0x14122f2a8';operation='xrefs'},
+            @{label='uart-trigger-code';selector='0x1407a7545';operation='function'}
+          )) {
+            $out="reports\ghidra-$($spec.label).json"
+            $stderr="reports\ghidra-$($spec.label).stderr.txt"
+            if ($spec.operation -eq 'search') {
+              & rea search $exe $spec.selector --provider ghidra --json 1> $out 2> $stderr
+            } elseif ($spec.operation -eq 'xrefs') {
+              & rea xrefs $exe $spec.selector --provider ghidra --json 1> $out 2> $stderr
+            } else {
+              & rea function $exe $spec.selector --provider ghidra --json 1> $out 2> $stderr
+            }
+            $code=$LASTEXITCODE
+            "$($spec.label) exit: $code" | Out-File reports\rea-queries.txt -Append
+            if ($code -ne 0) {
+              # If Ghidra provider cannot start or query, retain diagnostics but avoid wasting runner.
+              "Native provider did not complete this query" | Out-File reports\rea-queries.txt -Append
+              break
+            }
+          }
+          python experiments/lixiangtools/ghidra_results.py reports --output reports\ghidra-projected.json
+          exit 0
+
+      - name: Remove unbounded native Evidence and upload summary only
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem reports -Filter 'ghidra-*.json' | Where-Object { $_.Name -ne 'ghidra-projected.json' -and $_.Name -ne 'ghidra-doctor.json' } | Remove-Item -Force
+          if (Test-Path reports\ghidra-doctor.json) {
+            if ((Get-Item reports\ghidra-doctor.json).Length -gt 256000) { Remove-Item reports\ghidra-doctor.json }
+          }
+          exit 0
+
+      - name: Upload tool diagnostics and bounded evidence (no binaries)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lixiangtools-ghidra-native-report
+          path: reports/**
+          retention-days: 7
+          if-no-files-found: warn
