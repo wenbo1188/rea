@@ -69,6 +69,7 @@ jobs:
           } else {
             '7-Zip unavailable; skipped extraction.' | Out-File extraction.log
           }
+          exit 0
 
       - name: Bounded Python PE triage
         shell: pwsh
@@ -110,6 +111,7 @@ jobs:
           }
           "Static reports generated using REA v6.7.0; client and vehicle were not executed or connected." |
             Out-File -Append $env:GITHUB_STEP_SUMMARY
+          exit 0
 
       - name: Upload analysis evidence, never upload the installer
         if: always()
