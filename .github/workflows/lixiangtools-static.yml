@@ -1,0 +1,119 @@
+name: LIXIANGTOOLS read-only REA analysis
+
+on:
+  push:
+    branches:
+      - analysis/lixiangtools-static
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  triage:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node and Python
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install static analyzers
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check pefile==2024.8.26
+          npm install --global rea-agents@6.7.0
+          rea --help | Select-Object -First 12
+
+      - name: Download and verify upstream Windows installer (never execute)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = Join-Path $env:RUNNER_TEMP 'LIXIANGTOOLS_TARGET'
+          New-Item -ItemType Directory -Force -Path $target | Out-Null
+          $exe = Join-Path $target 'LItools_v2.0.exe'
+          $uri = 'https://www.lixiang.tools/downloads/LItools_v2.0.exe'
+          Invoke-WebRequest -Uri $uri -OutFile $exe -UserAgent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+          $expected = '6bf6b992f121343da374645caaecd0cae53230c8664a9d1e3be6ba014ccbbf3f'
+          $actual = (Get-FileHash -Path $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "Installer SHA256 mismatch. Expected $expected, actual $actual. Refusing analysis; check upstream version."
+          }
+          "Verified installer SHA-256: $actual" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          Write-Host 'Installer hash verified; installer was NOT executed.'
+
+      - name: Extract embedded files without running setup
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP 'LIXIANGTOOLS_TARGET'
+          $exe = Join-Path $target 'LItools_v2.0.exe'
+          $unpacked = Join-Path $target 'extracted'
+          New-Item -ItemType Directory -Force -Path $unpacked | Out-Null
+          $sevenzip = 'C:\Program Files\7-Zip\7z.exe'
+          if (Test-Path $sevenzip) {
+            & $sevenzip x '-y' $exe "-o$unpacked" | Out-File extraction.log
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "7-Zip did not unpack the installer (exit $LASTEXITCODE); header triage will still run."
+            }
+          } else {
+            '7-Zip unavailable; skipped extraction.' | Out-File extraction.log
+          }
+
+      - name: Bounded Python PE triage
+        shell: pwsh
+        run: |
+          python experiments/lixiangtools/static_triage.py "$env:RUNNER_TEMP\LIXIANGTOOLS_TARGET" --output reports
+
+      - name: REA static PE and application inspection
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path reports | Out-Null
+          $target = Join-Path $env:RUNNER_TEMP 'LIXIANGTOOLS_TARGET'
+          $exe = Join-Path $target 'LItools_v2.0.exe'
+          $unpacked = Join-Path $target 'extracted'
+          $binaries = @($exe)
+          if (Test-Path $unpacked) {
+            $extra = @(Get-ChildItem -Path $unpacked -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Extension -in @('.exe', '.dll') } |
+              Sort-Object @{Expression={ if ($_.Name -match 'LIXIANG|LItools|bridge|serial') { 0 } else { 1 } }},Length |
+              Select-Object -First 6 -ExpandProperty FullName)
+            $binaries += $extra
+          }
+          $i = 0
+          foreach ($bin in $binaries) {
+            $i += 1
+            foreach ($cmd in @('inspect-pe-imports', 'inspect-pe-certificates', 'inspect-pe-load-config')) {
+              $out = "reports\rea_$($i)_$($cmd).json"
+              $err = "reports\rea_$($i)_$($cmd).stderr.txt"
+              & rea $cmd $bin --json 1> $out 2> $err
+              if ($LASTEXITCODE -ne 0) {
+                Write-Warning "$cmd exited with code $LASTEXITCODE for $bin. See $err"
+              }
+            }
+          }
+          if (Test-Path $unpacked) {
+            & rea inspect-desktop-application $unpacked --json 1> reports\rea_desktop_application.json 2> reports\rea_desktop_application.stderr.txt
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "Desktop directory inspection did not complete."
+            }
+          }
+          "Static reports generated using REA v6.7.0; client and vehicle were not executed or connected." |
+            Out-File -Append $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload analysis evidence, never upload the installer
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lixiangtools-static-analysis
+          path: |
+            reports/**
+            extraction.log
+          if-no-files-found: warn
+          retention-days: 7
