@@ -163,6 +163,28 @@ jobs:
               'Graph omitted to bound artifact size' | Out-File reports\rea-ui-status.txt -Append
             }
           }
+          if ($code -ne 0) {
+            "Fork checkout lacks the packaged Windows native manifest; attempt released REA as fallback." | Out-File reports\rea-ui-status.txt -Append
+            npm install --global rea-agents@6.7.0 --no-audit --no-fund 1> reports\rea-release-install.stdout.txt 2> reports\rea-release-install.stderr.txt
+            if ($LASTEXITCODE -eq 0) {
+              rea analyze-javascript-application "$ui" --json 1> reports\rea-ui-packaged.json 2> reports\rea-ui-packaged.stderr.txt
+              "REA packaged exit code: $LASTEXITCODE" | Out-File reports\rea-ui-status.txt -Append
+              if (Test-Path reports\rea-ui-packaged.json) {
+                $raw = Get-Content reports\rea-ui-packaged.json -Raw -ErrorAction SilentlyContinue
+                try {
+                  $obj = $raw | ConvertFrom-Json -Depth 100
+                  $status = if ($obj.error) { "ERROR: $($obj.error)" } else { "OK" }
+                  "Packaged result status: $status" | Out-File reports\rea-ui-status.txt -Append
+                } catch {
+                  "Packaged output JSON could not be parsed: $($_.Exception.Message)" | Out-File reports\rea-ui-status.txt -Append
+                }
+                if ((Get-Item reports\rea-ui-packaged.json).Length -gt 5000000) {
+                  Remove-Item reports\rea-ui-packaged.json
+                  "Packaged graph was too large for artifact; full graph omitted" | Out-File reports\rea-ui-status.txt -Append
+                }
+              }
+            }
+          }
           exit 0
 
       - name: Upload metadata-only report (no proprietary binaries)
