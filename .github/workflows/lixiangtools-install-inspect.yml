@@ -171,6 +171,7 @@ jobs:
               "REA packaged exit code: $LASTEXITCODE" | Out-File reports\rea-ui-status.txt -Append
               if (Test-Path reports\rea-ui-packaged.json) {
                 python experiments/lixiangtools/project_rea_graph.py reports\rea-ui-packaged.json --output reports\rea-ui-summary.json
+                python experiments/lixiangtools/trace_rea_semantics.py reports\rea-ui-packaged.json --output reports\rea-semantic-open-adb.json
                 $raw = Get-Content reports\rea-ui-packaged.json -Raw -ErrorAction SilentlyContinue
                 try {
                   $obj = $raw | ConvertFrom-Json -Depth 100
