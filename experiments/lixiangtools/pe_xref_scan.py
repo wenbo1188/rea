@@ -77,7 +77,13 @@ def main(src, out):
         for op in cs.disasm(data,base+sec.VirtualAddress):
             insns+=1
             if insns > MAX_INST: break
-            for operand in op.operands:
+            if op.id == 0 or op.mnemonic == ".byte":
+                continue
+            try:
+                operands = op.operands
+            except Exception:
+                continue
+            for operand in operands:
                 if operand.type != CS_OP_MEM or operand.mem.base != X86_REG_RIP:
                     continue
                 dest = op.address + op.size + operand.mem.disp
