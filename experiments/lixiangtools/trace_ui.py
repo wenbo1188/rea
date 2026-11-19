@@ -18,6 +18,10 @@ ANCHORS = [
     "/api/session/bootstrap", "operator_token", "uart_trigger",
     "CP2105_VID", "CP2105_PID", "api.lixiang.tools",
     "version-bootloader", "ota_swin", "8.7",
+    "unlock.server_client", "server_client.py", "BuildRequest", "BuildResponse",
+    "post_build", "unlock.flow", "run_open_adb", "verify_restore_blob",
+    "write_and_flash", "skip_uart_trigger", "skip_uart",
+    "getvar", "expected_vin", "expected_serialno", "expected_sha256",
 ]
 UI_TERMS = [
     "startOpenAdb", "cancelOpenAdb", "OPEN ADB", "openadb",
