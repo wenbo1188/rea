@@ -1,0 +1,127 @@
+name: LIXIANGTOOLS installed-client inspection
+
+on:
+  push:
+    branches:
+      - analysis/lixiangtools-static
+    paths:
+      - .github/workflows/lixiangtools-install-inspect.yml
+      - experiments/lixiangtools/**
+  pull_request:
+    paths:
+      - .github/workflows/lixiangtools-install-inspect.yml
+      - experiments/lixiangtools/**
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  isolated-inspection:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install read-only analysis library
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check pefile==2024.8.26
+
+      - name: Download SHA-256 pinned vendor installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path reports | Out-Null
+          $installer = Join-Path $env:RUNNER_TEMP 'LItools_v2.0.exe'
+          Invoke-WebRequest -Uri 'https://www.lixiang.tools/downloads/LItools_v2.0.exe' -OutFile $installer -UserAgent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+          $expected = '6bf6b992f121343da374645caaecd0cae53230c8664a9d1e3be6ba014ccbbf3f'
+          $actual = (Get-FileHash -Path $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "SHA-256 mismatch: $actual; expected $expected" }
+          "Installer SHA-256: $actual" | Set-Content -Path reports\installer-facts.txt
+
+      - name: Install into disposable Windows runner without login or vehicle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $installer = Join-Path $env:RUNNER_TEMP 'LItools_v2.0.exe'
+          $log = Join-Path $env:RUNNER_TEMP 'litools-setup.log'
+          $args = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG=$log"
+          "Attempting unattended installation with documented Inno Setup switches." | Out-File reports\install-status.txt
+          try {
+            $p = Start-Process -FilePath $installer -ArgumentList $args -PassThru -ErrorAction Stop
+            "Installer PID: $($p.Id)" | Out-File reports\install-status.txt -Append
+            try {
+              Wait-Process -Id $p.Id -Timeout 210 -ErrorAction Stop
+              $p.Refresh()
+              "Installer exit code: $($p.ExitCode)" | Out-File reports\install-status.txt -Append
+            } catch {
+              "Install was still running or required interaction after timeout: $($_.Exception.Message)" | Out-File reports\install-status.txt -Append
+              & taskkill /PID $p.Id /T /F 2>&1 | Out-File reports\install-status.txt -Append
+            }
+          } catch {
+            "Installer launch error: $($_.Exception.Message)" | Out-File reports\install-status.txt -Append
+          }
+          if (Test-Path $log) {
+            Get-Content -Path $log -Tail 150 | Out-File reports\setup-log-tail.txt
+          }
+          exit 0
+
+      - name: Inventory installed binaries and client modules
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $roots = @(
+            $env:ProgramFiles,
+            [Environment]::GetFolderPath('ProgramFilesX86'),
+            $env:LOCALAPPDATA,
+            $env:APPDATA,
+            $env:ProgramData,
+            'C:\'
+          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+          $matches = New-Object System.Collections.Generic.List[string]
+          foreach ($root in $roots) {
+            $dirs = @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match '(?i)li.?tools|lixiang' })
+            foreach ($d in $dirs) { $matches.Add($d.FullName) }
+          }
+          $uninstall = @(
+            Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue
+            Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue
+            Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue
+          ) | Where-Object { $_.DisplayName -match '(?i)li.?tools|lixiang' } |
+            Select-Object DisplayName,DisplayVersion,Publisher,InstallLocation,DisplayIcon
+          $uninstall | ConvertTo-Json -Depth 5 | Set-Content reports\uninstall-registry.json
+          foreach ($item in @($uninstall)) {
+            if ($item.InstallLocation -and (Test-Path $item.InstallLocation)) { $matches.Add($item.InstallLocation) }
+          }
+          $matches = @($matches | Select-Object -Unique)
+          @($matches) | Out-File reports\install-locations.txt
+          $fileInventory = @()
+          foreach ($dir in $matches) {
+            $files = @(Get-ChildItem $dir -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 2500)
+            foreach ($f in $files) {
+              $fileInventory += [pscustomobject]@{base=$dir;path=$f.FullName.Substring($dir.Length);length=$f.Length;extension=$f.Extension}
+            }
+          }
+          $fileInventory | ConvertTo-Json -Depth 5 | Set-Content reports\installed-files.json
+          "Matched folders: $($matches.Count); inventoried files: $($fileInventory.Count)" | Out-File reports\inventory-summary.txt
+          $target = @($matches | Where-Object { Get-ChildItem $_ -Filter '*.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 }) | Select-Object -First 1
+          if ($target) {
+            python experiments/lixiangtools/static_triage.py "$target" --output reports
+          } else {
+            "No installed application folder with EXE found" | Out-File reports\triage-blocker.txt
+          }
+          exit 0
+
+      - name: Upload metadata-only report (no proprietary binaries)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lixiangtools-installed-client-report
+          path: reports/**
+          if-no-files-found: warn
+          retention-days: 7
