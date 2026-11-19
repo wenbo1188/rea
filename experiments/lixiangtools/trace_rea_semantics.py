@@ -20,8 +20,11 @@ MAX_DEPTH = 2
 def find_id(o):
     return next((o.get(k) for k in ("node_id","id") if isinstance(o.get(k),str)),None)
 
+def observations(o):
+    return [v for v in o.get("observations",[]) if isinstance(v,dict)]
+
 def clean_label(o):
-    val=o.get("label") or ""
+    val=o.get("label") or next((v.get("label") for v in observations(o) if isinstance(v.get("label"),str)),"")
     # source code and tokens must not be copied to report
     if not isinstance(val,str): val=""
     val=re.sub(r"https?://[^\s]+","[URL]",val)
@@ -29,14 +32,15 @@ def clean_label(o):
     return val
 
 def short_props(o):
-    p=o.get("properties")
-    if not isinstance(p,dict): return {}
-    allow=("value","endpoint","event_name","name","method","property")
+    allow=("value","endpoint","event_name","name","method","property","operation","field")
     out={}
-    for k in allow:
-        v=p.get(k)
-        if isinstance(v,str) and len(v)<110 and (FIELD_NAME.fullmatch(v) or v in ("open_adb","open_adb_v1","op.run","op.check_license")):
-            out[k]=v
+    prop_sources = [o.get("properties")] + [x.get("properties") for x in observations(o)]
+    for p in prop_sources:
+        if not isinstance(p,dict): continue
+        for k in allow:
+            v=p.get(k)
+            if isinstance(v,str) and len(v)<110 and (FIELD_NAME.fullmatch(v) or v in ("open_adb","open_adb_v1","op.run","op.check_license")):
+                if k not in out: out[k]=v
     return out
 
 def pick_edge_end(o,names):
