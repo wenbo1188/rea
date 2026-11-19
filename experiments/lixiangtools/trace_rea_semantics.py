@@ -10,7 +10,7 @@ import re
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 
-SEED = re.compile(r"startOpenAdb|check_license|op\.run|open_adb_v1|open_adb|/api/session/bootstrap",re.I)
+SEED = re.compile(r"startOpenAdb|check_license|op\.run|open.?adb|license|/api/session/bootstrap|pipeline",re.I)
 FIELD_NAME = re.compile(r"^[a-zA-Z_$][\w$./:-]{0,95}$")
 MAX_SEEDS = 18
 MAX_VISITS = 140
@@ -64,6 +64,11 @@ def main(src,dst):
         p=short_props(o)
         if SEED.search(clean_label(o)) or any(SEED.search(v) for v in p.values()):
             seeds.append(i)
+    def rank(i):
+        n=idx[i]; text=(clean_label(n)+" "+" ".join(short_props(n).values())).lower()
+        markers=("startopenadb","check_license","op.run","open_adb_v1","openadb","license","pipeline","/api/session/bootstrap")
+        return (next((j for j,m in enumerate(markers) if m in text),99),text)
+    seeds.sort(key=rank)
     sources=("source_node_id","from_node_id","source_id","from","source")
     targets=("target_node_id","to_node_id","target_id","to","target")
     adj=defaultdict(list)
