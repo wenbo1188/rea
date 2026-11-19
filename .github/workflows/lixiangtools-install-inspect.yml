@@ -113,6 +113,8 @@ jobs:
           $target = @($foundFolders | Where-Object { Get-ChildItem $_ -Filter '*.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 }) | Select-Object -First 1
           if ($target) {
             python experiments/lixiangtools/static_triage.py "$target" --output reports
+            $main = Join-Path $target "LIXIANGTOOLS.exe"
+            if (Test-Path $main) { python experiments/lixiangtools/focused_strings.py "$main" --output reports }
           } else {
             "No installed application folder with EXE found" | Out-File reports\triage-blocker.txt
           }
