@@ -10,7 +10,9 @@ KEYWORDS = {
     "unlock": r"open.?adb|openadb|unlock.?adb|enable.?adb|adb.?enable|adb.?unlock|adb.?lock",
     "serial": r"qserialport|qtserialport|serialport|uart|baudrate|baud.?rate|cp210|silabser|tty|comport|portname",
     "android": r"adbclient|adb_server|android_adb|adb_exe|fastboot|scrcpy|qcom|qualcomm",
-    "remote": r"license|activation|authorize|auth|token|api_url|api_host|websocket|wss:|https:|http:|download",
+    "remote": r"license|activation|authorize|auth|token|server_url|base_url|api_url|api_host|websocket|wss:|https:|http:|download|session|request|payload",
+    "fastboot": r"fastboot|laconfig|flash|reboot|bootloader|unlock\.fastboot",
+    "ui_bridge": r"Bridge\.|OpenAdbRunner|qwebchannel|openadb_runner|startOpenAdb",
     "compiler": r"nuitka|pyinstaller|cx_freeze|pyoxidizer|py2exe|py_?init|python313",
     "vehicle": r"lixiang|vin|OTA|model|vehicle|firmware",
     "crypto": r"signature|rsa|ecdsa|ed25519|aes|encrypt|decrypt|hmac",
@@ -30,7 +32,8 @@ def main(exe, out):
     for regex, dec in ((re.compile(rb"[\x20-\x7e]{4,320}"), "ascii"),
                        (re.compile(rb"(?:[\x20-\x7e]\x00){4,320}"), "utf-16le")):
         for m in regex.finditer(raw):
-            candidates.append((m.start(),m.group().decode(dec,"replace")))
+            if m.start() >= 0x1130000:
+                candidates.append((m.start(),m.group().decode(dec,"replace")))
     for group, expr in KEYWORDS.items():
         regex = re.compile(expr, re.I)
         group_results = []
