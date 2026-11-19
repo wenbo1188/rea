@@ -6,6 +6,7 @@ on:
     paths:
       - .github/workflows/lixiangtools-ghidra.yml
       - experiments/lixiangtools/ghidra_results.py
+      - experiments/lixiangtools/ghidra_scripts/**
   pull_request:
     paths:
       - .github/workflows/lixiangtools-ghidra.yml
@@ -95,38 +96,22 @@ jobs:
           "REA doctor exit: $LASTEXITCODE" | Out-File reports\rea-queries.txt
           exit 0
 
-      - name: Run read-only Ghidra static functions / refs
+      - name: Ghidra focused headless analysis of Nuitka PE
         shell: pwsh
         run: |
           $ErrorActionPreference='Continue'
           $exe='C:\Program Files\LIXIANGTOOLS\LIXIANGTOOLS.exe'
-          $env:GHIDRA_INSTALL_DIR=(Get-Content reports\ghidra-root.txt -Raw).Trim()
-          $env:REA_ANALYSIS_PROVIDER='ghidra'
-          foreach ($spec in @(
-            @{label='openadb-ui-bridge-string';selector='startOpenAdb';operation='search'},
-            @{label='uart-trigger-module-string';selector='unlock.uart_trigger';operation='search'},
-            @{label='laconfig-payload-string';selector='laconfig_b64';operation='search'},
-            @{label='uart-trigger-ref';selector='0x14122f2a8';operation='xrefs'},
-            @{label='uart-trigger-code';selector='0x1407a7545';operation='function'}
-          )) {
-            $out="reports\ghidra-$($spec.label).json"
-            $stderr="reports\ghidra-$($spec.label).stderr.txt"
-            if ($spec.operation -eq 'search') {
-              & rea search $exe $spec.selector --provider ghidra --json 1> $out 2> $stderr
-            } elseif ($spec.operation -eq 'xrefs') {
-              & rea xrefs $exe $spec.selector --provider ghidra --json 1> $out 2> $stderr
-            } else {
-              & rea function $exe $spec.selector --provider ghidra --json 1> $out 2> $stderr
-            }
-            $code=$LASTEXITCODE
-            "$($spec.label) exit: $code" | Out-File reports\rea-queries.txt -Append
-            if ($code -ne 0) {
-              # If Ghidra provider cannot start or query, retain diagnostics but avoid wasting runner.
-              "Native provider did not complete this query" | Out-File reports\rea-queries.txt -Append
-              break
-            }
+          $root=(Get-Content reports\ghidra-root.txt -Raw).Trim()
+          $headless=Join-Path $root 'support\analyzeHeadless.bat'
+          $project=Join-Path $env:RUNNER_TEMP 'rea_ghidra_case'
+          $scriptDir=Join-Path (Get-Location) 'experiments\lixiangtools\ghidra_scripts'
+          $output=(Join-Path (Get-Location) 'reports\ghidra-focused-native.txt')
+          New-Item -ItemType Directory -Force -Path $project | Out-Null
+          & $headless $project "LixiangStudy" -import $exe -analysisTimeoutPerFile 480 -scriptPath $scriptDir -postScript LixiangNativeRefs.java $output -deleteProject 1> reports\ghidra-headless.stdout.txt 2> reports\ghidra-headless.stderr.txt
+          "Ghidra headless exit: $LASTEXITCODE" | Out-File reports\rea-queries.txt -Append
+          if (-not (Test-Path $output)) {
+            "No focused script output (import or analysis may have timed out)" | Out-File reports\ghidra-focused-native.txt
           }
-          python experiments/lixiangtools/ghidra_results.py reports --output reports\ghidra-projected.json
           exit 0
 
       - name: Remove unbounded native Evidence and upload summary only
