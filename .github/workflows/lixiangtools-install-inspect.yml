@@ -29,7 +29,7 @@ jobs:
 
       - name: Install read-only analysis library
         shell: pwsh
-        run: python -m pip install --disable-pip-version-check pefile==2024.8.26
+        run: python -m pip install --disable-pip-version-check pefile==2024.8.26 capstone==5.0.6
 
       - name: Download SHA-256 pinned vendor installer
         shell: pwsh
@@ -116,6 +116,7 @@ jobs:
             $main = Join-Path $target "LIXIANGTOOLS.exe"
             if (Test-Path $main) { python experiments/lixiangtools/focused_strings.py "$main" --output reports }
             python experiments/lixiangtools/trace_ui.py "$target" --output reports
+            if (Test-Path $main) { python experiments/lixiangtools/pe_xref_scan.py "$main" --output reports }
           } else {
             "No installed application folder with EXE found" | Out-File reports\triage-blocker.txt
           }
